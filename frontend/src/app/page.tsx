@@ -20,9 +20,9 @@ export default function LandingPage() {
             A sabedoria de Allan Kardec ao alcance de uma conversa.
           </p>
           <p className="text-lg text-spirit-600 mb-10 max-w-2xl mx-auto">
-            Faça perguntas e receba respostas baseadas nos 5 livros do
-            Pentateuco Espírita. Nosso sistema encontra as passagens mais
-            relevantes diretamente nas obras originais.
+            Faça perguntas e receba respostas baseadas nas obras de Allan
+            Kardec. Nosso sistema encontra as passagens mais relevantes
+            diretamente nos textos originais.
           </p>
           <button
             onClick={() => router.push("/chat")}
@@ -47,8 +47,8 @@ export default function LandingPage() {
             />
             <FeatureCard
               icon="&#128214;"
-              title="5 Livros Completos"
-              description="Quando a resposta não está no L.E., buscamos nos demais livros do Pentateuco: Médiuns, Evangelho, Céu e Inferno e Gênese."
+              title="Obras Ampliadas"
+              description="Quando a resposta não está no L.E., buscamos nos demais livros indexados: Médiuns, Evangelho, Céu e Inferno, Gênese, O que é o Espiritismo e Obras Póstumas."
             />
             <FeatureCard
               icon="&#128221;"
@@ -79,7 +79,7 @@ export default function LandingPage() {
             <ConfidenceLevel
               level="Exploratória"
               color="bg-blue-100 border-blue-400"
-              description="Para temas mais amplos, buscamos nos 5 livros completos e elaboramos uma resposta fundamentada."
+              description="Para temas mais amplos, buscamos em todas as obras indexadas e elaboramos uma resposta fundamentada."
             />
           </div>
         </div>

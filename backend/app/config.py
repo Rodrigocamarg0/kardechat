@@ -1,16 +1,20 @@
 """Configuração do backend via variáveis de ambiente."""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     # MongoDB
-    mongo_uri: str = "mongodb://kardechat:kardechat_secret@localhost:27017/kardechat?authSource=admin"
+    mongo_uri: str = "mongodb://localhost:27017/kardechat?directConnection=true"
     db_name: str = "kardechat"
 
-    # Coleções
-    qa_collection: str = "le_questions"
+    # Coleção de dados indexados
     books_collection: str = "books_chunks"
+    books_vector_index: str = "books_vector_idx"
+    vector_num_candidates_factor: int = 20
+    vector_min_num_candidates: int = 100
 
     # OpenAI
     openai_api_key: str = ""
@@ -26,12 +30,8 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:3000"
 
-    # Thresholds de similaridade (Q-to-Q)
-    high_confidence: float = 0.88
-    medium_confidence: float = 0.75
-
     class Config:
-        env_file = ".env"
+        env_file = Path(__file__).resolve().parents[2] / ".env"
 
 
 settings = Settings()

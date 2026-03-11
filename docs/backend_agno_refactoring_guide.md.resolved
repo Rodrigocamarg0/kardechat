@@ -1,0 +1,646 @@
+# Guia de Refatoração do Backend — Kardechat → Agno Framework
+
+> **Objetivo**: Migrar o backend do Kardechat de uma implementação RAG manual para o framework [Agno](https://docs.agno.com), aproveitando sua camada de agentes, knowledge bases nativas e session storage integrado.
+
+---
+
+## 1. Diagnóstico da Arquitetura Atual
+
+### Estrutura de arquivos
+
+```
+backend/app/
+├── main.py        # FastAPI app + lifespan
+├── config.py      # Settings via pydantic-settings
+├── database.py    # Motor (MongoDB async driver) – conexão manual
+├── embeddings.py  # Wrapper OpenAI Embeddings – chamada manual
+├── search.py      # Busca vetorial + BM25 implementadas do zero
+├── chat.py        # Orquestração RAG + prompts + chamada OpenAI
+├── routes.py      # Rota POST /api/chat
+└── models.py      # Pydantic models (request/response)
+```
+
+### Fluxo atual
+
+```mermaid
+sequenceDiagram
+    participant F as Frontend
+    participant R as /api/chat
+    participant C as chat.py
+    participant S as search.py
+    participant E as embeddings.py
+    participant M as MongoDB (motor)
+    participant O as OpenAI API
+
+    F->>R: POST { question, extensive }
+    R->>C: generate_chat_response()
+    C->>E: generate_embedding(question)
+    E->>O: embeddings.create()
+    C->>S: hybrid_search(question, embedding)
+    S->>M: find() – todos os docs em memória
+    S-->>C: { strategy, le_results, book_results }
+    C->>O: chat.completions.create()
+    C-->>R: { answer, citations, strategy, confidence }
+    R-->>F: ChatResponse
+```
+
+### Problemas identificados
+
+| Problema | Impacto |
+|---|---|
+| [search.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/search.py) carrega **todos** os documentos em memória para calcular cosine similarity | Latência crescente, sem escala |
+| Embeddings gerados a cada request (sem cache) | Custo e latência desnecessários |
+| Sem histórico de conversa — `previous_answer` é passado pelo cliente | Estado frágil, sem persistência real |
+| Prompts como strings soltas em [chat.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/chat.py) | Difícil de manter e testar |
+| Nenhuma camada de agente — toda a orquestração é imperativa | Sem capacidade de tool use, expansão futura limitada |
+| `rank-bm25` + `numpy` usados manualmente | Agno já oferece hybrid search nativo |
+
+---
+
+## 2. Arquitetura Alvo com Agno
+
+### Visão geral
+
+```mermaid
+graph TD
+    subgraph FastAPI
+        R[POST /api/chat]
+        R2[POST /api/chat/stream]
+    end
+
+    subgraph Agno Agent Layer
+        Agent["KardechatAgent\n(agno.agent.Agent)"]
+        KB_LE["Knowledge: Livro dos Espíritos\n(MongoVectorDb – le_questions)"]
+        KB_BOOKS["Knowledge: Demais Livros\n(MongoVectorDb – books_chunks)"]
+        Storage["Session Storage\n(MongoDb – agno_sessions)"]
+    end
+
+    R --> Agent
+    R2 --> Agent
+    Agent --> KB_LE
+    Agent --> KB_BOOKS
+    Agent --> Storage
+    Agent --> OpenAI["OpenAI gpt-4o-mini"]
+```
+
+### Mapeamento: atual vs. Agno
+
+| Componente atual | Substituto Agno |
+|---|---|
+| [embeddings.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/embeddings.py) (OpenAI Embeddings manual) | `agno.knowledge.embedder.openai.OpenAIEmbedder` |
+| [search_le_questions()](file:///Users/Rodrigo/CMP/kardechat/backend/app/search.py#27-66) (cosine in-memory) | `MongoVectorDb` com `SearchType.vector` |
+| [search_le_keywords()](file:///Users/Rodrigo/CMP/kardechat/backend/app/search.py#68-79) (MongoDB `$text`) | `MongoVectorDb` com `SearchType.hybrid` |
+| [search_books_vector()](file:///Users/Rodrigo/CMP/kardechat/backend/app/search.py#81-115) + [search_books_keywords()](file:///Users/Rodrigo/CMP/kardechat/backend/app/search.py#117-128) | Segunda `Knowledge` no mesmo `MongoVectorDb` |
+| [database.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/database.py) (motor manually) | `agno.storage.mongodb.MongoDb` para sessões |
+| [chat.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/chat.py) (LLM call + prompt assembly) | `Agent` com `instructions`, `knowledge`, `storage` |
+| `previous_answer` passado pelo cliente | `session_id` + histórico automático do Agent |
+
+---
+
+## 3. Plano de Migração — Passo a Passo
+
+### Fase 1 — Dependências
+
+Atualizar [requirements.txt](file:///Users/Rodrigo/CMP/kardechat/backend/requirements.txt):
+
+```diff
+  fastapi==0.115.6
+  uvicorn[standard]==0.34.0
+- pymongo==4.11.3
+- motor==3.7.1
+- openai==1.58.1
+- python-dotenv==1.0.1
+  pydantic==2.10.3
+  pydantic-settings==2.7.0
+  supabase==2.11.0
+  httpx==0.28.1
+- rank-bm25==0.2.2
+- numpy==2.2.1
++ agno>=1.4.0
++ openai>=1.58.1
++ pymongo>=4.11.3          # Agno usa pymongo internamente
++ motor>=3.7.1             # mantido se usar AsyncMongoDb
+```
+
+> [!NOTE]
+> O Agno inclui suporte a MongoDB via `agno.vectordb.mongodb.MongoVectorDb` e `agno.storage.mongodb.MongoDb`. Não é necessário manter wrappers manuais.
+
+---
+
+### Fase 2 — Knowledge Bases com MongoDB
+
+Substituir toda a lógica de [search.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/search.py) por duas knowledge bases Agno nativas.
+
+**Novo arquivo: `app/knowledge.py`**
+
+```python
+"""
+Knowledge bases do Kardechat usando Agno + MongoDB.
+
+- kb_le: Livro dos Espíritos (Q-to-Q matching)
+- kb_books: Demais obras de Allan Kardec (RAG por chunks)
+"""
+
+from agno.knowledge.knowledge import Knowledge
+from agno.vectordb.mongodb import MongoVectorDb
+from agno.vectordb.search import SearchType
+from agno.knowledge.embedder.openai import OpenAIEmbedder
+
+from app.config import settings
+
+
+def _make_embedder() -> OpenAIEmbedder:
+    return OpenAIEmbedder(
+        id=settings.embedding_model,          # "text-embedding-3-large"
+        dimensions=settings.embedding_dimensions,  # 3072
+        api_key=settings.openai_api_key,
+    )
+
+
+# Knowledge base: Livro dos Espíritos
+# - collection já existente: "le_questions"
+# - campo vetorial: "qa_embedding"
+# - Hybrid search = vetorial + keyword ($text index)
+kb_le = Knowledge(
+    name="Livro dos Espíritos",
+    description=(
+        "Perguntas e respostas do Livro dos Espíritos de Allan Kardec. "
+        "Use para busca semântica Q-to-Q."
+    ),
+    vector_db=MongoVectorDb(
+        collection_name=settings.qa_collection,     # "le_questions"
+        db_url=settings.mongo_uri,
+        search_index_name="qa_vector_index",        # nome do índice Atlas / local
+        search_type=SearchType.hybrid,
+        embedder=_make_embedder(),
+    ),
+    max_results=3,
+)
+
+
+# Knowledge base: demais livros indexados (chunks de texto)
+kb_books = Knowledge(
+    name="Obras de Kardec",
+    description=(
+        "Trechos e chunks das demais obras de Allan Kardec. "
+        "Use para RAG quando o Livro dos Espíritos não for suficiente."
+    ),
+    vector_db=MongoVectorDb(
+        collection_name=settings.books_collection,  # "books_chunks"
+        db_url=settings.mongo_uri,
+        search_index_name="books_vector_index",
+        search_type=SearchType.hybrid,
+        embedder=_make_embedder(),
+    ),
+    max_results=5,
+)
+```
+
+> [!IMPORTANT]
+> Os dados já estão no MongoDB com embeddings pré-gerados (`qa_embedding`, `text_embedding`). O `MongoVectorDb` do Agno precisa saber o nome do campo vetorial. Verifique o parâmetro `embedding_field` na versão atual do Agno e ajuste conforme necessário. Se os embeddings foram gerados com `text-embedding-3-large` com 3072 dimensões, garanta que o embedder configurado aqui usar o mesmo modelo para queries.
+
+---
+
+### Fase 3 — Session Storage com MongoDB
+
+**Novo arquivo: `app/session_store.py`**
+
+```python
+"""Session storage para o agente Kardechat usando MongoDB."""
+
+from agno.storage.mongodb import MongoDb
+from app.config import settings
+
+# Sessões serão salvas em uma coleção separada: "agno_sessions"
+agent_storage = MongoDb(
+    collection_name="agno_sessions",
+    db_url=settings.mongo_uri,
+)
+```
+
+Isso substitui a necessidade de o cliente passar `previous_answer` — o Agno mantém o histórico automaticamente por `session_id`.
+
+---
+
+### Fase 4 — Agente Principal
+
+Substituir [chat.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/chat.py) por um agente Agno com as instruções do sistema e as duas knowledge bases.
+
+**Novo arquivo: `app/agent.py`**
+
+```python
+"""
+Agente Kardechat construído com Agno.
+
+- Usa duas knowledge bases (Livro dos Espíritos + Demais obras)
+- Mantém histórico de conversa via session_id (MongoDb storage)
+- Usa Agentic RAG: o agente decide quando e o que buscar
+"""
+
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
+
+from app.config import settings
+from app.knowledge import kb_le, kb_books
+from app.session_store import agent_storage
+
+
+SYSTEM_INSTRUCTIONS = [
+    "Você é Kardechat, um assistente especializado na Doutrina Espírita "
+    "codificada por Allan Kardec. Responda sempre em português brasileiro.",
+
+    "Suas respostas devem ser fiéis ao conteúdo original dos livros de Allan Kardec, "
+    "claras e acessíveis, mas respeitando a profundidade do tema.",
+
+    "SEMPRE busque nas suas bases de conhecimento antes de responder. "
+    "Priorize resultados do 'Livro dos Espíritos' (Q-to-Q matching). "
+    "Se a confiança for baixa, expanda a busca para as demais obras.",
+
+    "Nunca invente informações. Se o contexto não for suficiente, "
+    "informe que não encontrou uma resposta precisa nos livros.",
+
+    "Ao citar trechos, mencione o livro, número da pergunta (para o L.E.) "
+    "ou o título e página quando disponíveis.",
+
+    "Quando o usuário pedir uma resposta mais detalhada, aprofunde a explicação "
+    "usando todo o contexto disponível nas bases de conhecimento.",
+]
+
+
+def get_kardechat_agent(session_id: str | None = None) -> Agent:
+    """
+    Instancia o agente Kardechat para uma sessão específica.
+
+    Args:
+        session_id: ID de sessão para manter histórico de conversa.
+                    Se None, cria uma nova sessão automaticamente.
+
+    Returns:
+        Agent configurado e pronto para uso.
+    """
+    return Agent(
+        name="Kardechat",
+        model=OpenAIChat(
+            id=settings.chat_model,       # "gpt-4o-mini"
+            api_key=settings.openai_api_key,
+            temperature=0.3,
+            max_tokens=1500,
+        ),
+        # Duas knowledge bases: Agno vai escolher qual buscar
+        knowledge=[kb_le, kb_books],
+        search_knowledge=True,   # Agentic RAG: agente decide quando buscar
+
+        # Session storage: histórico automático por session_id
+        storage=agent_storage,
+        session_id=session_id,
+        add_history_to_messages=True,    # inclui histórico no contexto
+        num_history_runs=5,              # quantas trocas anteriores incluir
+
+        instructions=SYSTEM_INSTRUCTIONS,
+        markdown=True,
+    )
+```
+
+> [!TIP]
+> Com `search_knowledge=True` (padrão quando `knowledge` é fornecido), o agente recebe uma ferramenta `search_knowledge_base()` que ele chama automaticamente com base na pergunta do usuário. Isso substitui o confidence-based routing manual — o modelo decide dinamicamente o que buscar.
+
+---
+
+### Fase 5 — Rotas FastAPI Atualizadas
+
+**Atualizar [app/routes.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/routes.py):**
+
+```python
+"""Rotas da API."""
+
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+from app.agent import get_kardechat_agent
+from app.models import ChatRequest, ChatResponse, HealthResponse
+
+router = APIRouter()
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health_check():
+    return HealthResponse(status="ok", version="2.0.0")
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Endpoint de chat com Agno Agent.
+
+    - session_id opcional: mantém histórico entre chamadas
+    - O agente busca automaticamente nas knowledge bases
+    """
+    agent = get_kardechat_agent(session_id=request.session_id)
+
+    run_response = await agent.arun(
+        message=request.question,
+        stream=False,
+    )
+
+    return ChatResponse(
+        answer=run_response.content,
+        session_id=agent.session_id,
+        citations=_extract_citations(run_response),
+    )
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Endpoint de chat com streaming SSE."""
+    agent = get_kardechat_agent(session_id=request.session_id)
+
+    async def token_generator():
+        async for chunk in await agent.arun(
+            message=request.question,
+            stream=True,
+        ):
+            if chunk.content:
+                yield f"data: {chunk.content}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        token_generator(),
+        media_type="text/event-stream",
+    )
+
+
+def _extract_citations(run_response) -> list[dict]:
+    """Extrai citações do contexto de knowledge retornado pelo agente."""
+    citations = []
+    if hasattr(run_response, "extra_data") and run_response.extra_data:
+        references = run_response.extra_data.get("references", [])
+        for ref in references:
+            citations.append({
+                "book": ref.get("name", ""),
+                "reference": ref.get("meta_data", {}).get("reference", ""),
+                "text": ref.get("content", "")[:500],
+                "score": ref.get("similarity", 0.0),
+            })
+    return citations
+```
+
+**Atualizar [app/models.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/models.py):**
+
+```python
+"""Modelos Pydantic para request/response."""
+
+from pydantic import BaseModel
+
+
+class ChatRequest(BaseModel):
+    question: str
+    session_id: str | None = None      # substitui previous_answer
+    # extensive: bool = False           # remover – o agente deduz pelo contexto
+
+
+class Citation(BaseModel):
+    book: str
+    reference: str
+    text: str | None = None
+    score: float = 0.0
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    session_id: str                    # retorna para o cliente manter a sessão
+    citations: list[Citation] = []
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+```
+
+---
+
+### Fase 6 — Simplificar [main.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/main.py)
+
+Com o Agno, não precisamos mais do lifespan de conexão manual com o MongoDB (o Agno gerencia internamente). Mas ainda podemos manter uma verificação de saúde básica:
+
+```python
+"""Kardechat API – FastAPI application."""
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
+from app.routes import router
+
+app = FastAPI(
+    title="Kardechat API",
+    description="API do Kardechat – Chatbot espírita com Agno Agent + Agentic RAG",
+    version="2.0.0",
+)
+
+origins = [o.strip() for o in settings.cors_origins.split(",")]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(router, prefix="/api")
+```
+
+---
+
+### Fase 7 — Atualizar [config.py](file:///Users/Rodrigo/CMP/kardechat/backend/app/config.py)
+
+```python
+"""Configuração do backend via variáveis de ambiente."""
+
+from pathlib import Path
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    # MongoDB
+    mongo_uri: str = "mongodb://kardechat:kardechat_secret@localhost:27017/kardechat?authSource=admin"
+    db_name: str = "kardechat"
+
+    # Coleções existentes (dados já indexados)
+    qa_collection: str = "le_questions"
+    books_collection: str = "books_chunks"
+
+    # OpenAI
+    openai_api_key: str = ""
+    embedding_model: str = "text-embedding-3-large"
+    embedding_dimensions: int = 3072
+    chat_model: str = "gpt-4o-mini"
+
+    # Supabase
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_service_role_key: str = ""
+
+    # CORS
+    cors_origins: str = "http://localhost:3000"
+
+    # Removidos: high_confidence, medium_confidence
+    # → O Agno (Agentic RAG) gerencia a decisão de busca internamente
+
+    class Config:
+        env_file = Path(__file__).resolve().parents[2] / ".env"
+
+
+settings = Settings()
+```
+
+---
+
+## 4. Estrutura de Arquivos Final
+
+```
+backend/app/
+├── main.py            # FastAPI app – simplificado
+├── config.py          # Settings – removidos thresholds manuais
+├── knowledge.py       # ✨ NOVO – kb_le + kb_books com MongoVectorDb
+├── session_store.py   # ✨ NOVO – MongoDb session storage
+├── agent.py           # ✨ NOVO – get_kardechat_agent()
+├── routes.py          # Atualizado – usa Agent, adiciona /chat/stream
+└── models.py          # Atualizado – session_id em vez de previous_answer
+
+# Arquivos removidos:
+# database.py   → gerenciado pelo Agno
+# embeddings.py → gerenciado pelo OpenAIEmbedder do Agno
+# search.py     → substituído pelo Knowledge + MongoVectorDb
+# chat.py       → substituído pelo Agent
+```
+
+---
+
+## 5. Considerações sobre o Confidence-Based Routing
+
+O sistema atual tem uma lógica sofisticada de roteamento por confiança (high/medium/low). Com Agno, essa lógica é delegada ao próprio agente. Para manter controle fino, existem duas abordagens:
+
+### Opção A: Deixar o Agente Decidir (Recomendada)
+Usar `search_knowledge=True` (Agentic RAG padrão). O modelo LLM decide quando e o que buscar, o que é mais flexível e escalável.
+
+### Opção B: Routing Customizado via Ferramentas
+Criar tools personalizadas que encapsulam a lógica de confiança:
+
+```python
+from agno.tools import tool
+
+@tool
+async def search_livro_dos_espiritos(query: str) -> str:
+    """Busca direta no Livro dos Espíritos. Use para perguntas sobre Q&A doutrinários."""
+    results = await kb_le.async_search(query)
+    # ... formatar e retornar
+    return formatted
+
+@tool
+async def search_demais_obras(query: str) -> str:
+    """Busca nos demais livros de Kardec. Use quando o L.E. não trouxer resposta precisa."""
+    results = await kb_books.async_search(query)
+    # ... formatar e retornar
+    return formatted
+
+# No agent:
+agent = Agent(
+    tools=[search_livro_dos_espiritos, search_demais_obras],
+    # NÃO usar knowledge= diretamente, usar tools customizadas
+    ...
+)
+```
+
+> [!TIP]
+> A Opção B preserva a lógica de domínio explícita e é mais previsível. A Opção A é mais simples e aproveita melhor a inteligência do modelo. Recomendamos começar com A e migrar para B se o comportamento não for satisfatório.
+
+---
+
+## 6. Migração dos Dados Existentes
+
+> [!WARNING]
+> Os embeddings já existem no MongoDB com campos `qa_embedding` e `text_embedding`. O `MongoVectorDb` do Agno pode ter um nome de campo padrão diferente. **Verifique o parâmetro `embedding_field` na documentação atual do Agno** e ajuste ou execute uma migração de renomeação de campos.
+
+Script de verificação/migração (arquivo temporário `/tmp/check_embedding_fields.py`):
+
+```python
+"""Verifica os campos de embedding no MongoDB e ajusta se necessário."""
+import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient
+
+MONGO_URI = "mongodb://kardechat:kardechat_secret@localhost:27017/kardechat?authSource=admin"
+AGNO_EMBEDDING_FIELD = "embedding"  # Campo padrão esperado pelo Agno
+
+async def check_and_migrate():
+    client = AsyncIOMotorClient(MONGO_URI)
+    db = client["kardechat"]
+
+    # Verificar le_questions
+    doc = await db["le_questions"].find_one({"qa_embedding": {"$exists": True}})
+    if doc:
+        print("❌ le_questions usa 'qa_embedding' – precisa renomear ou configurar field no Agno")
+    
+    # Verificar books_chunks
+    doc = await db["books_chunks"].find_one({"text_embedding": {"$exists": True}})
+    if doc:
+        print("❌ books_chunks usa 'text_embedding' – precisa renomear ou configurar field no Agno")
+
+    # Se precisar renomear em massa:
+    # await db["le_questions"].update_many(
+    #     {}, {"$rename": {"qa_embedding": AGNO_EMBEDDING_FIELD}}
+    # )
+
+asyncio.run(check_and_migrate())
+```
+
+---
+
+## 7. Índices MongoDB para Hybrid Search
+
+Para que o `MongoVectorDb` com `SearchType.hybrid` funcione localmente (sem Atlas Search), verifique se os índices de texto existem:
+
+```javascript
+// No MongoDB shell:
+
+// Índice de texto para le_questions
+db.le_questions.createIndex(
+  { question: "text", answer: "text" },
+  { name: "qa_text_index" }
+)
+
+// Índice de texto para books_chunks
+db.books_chunks.createIndex(
+  { text: "text" },
+  { name: "books_text_index" }
+)
+```
+
+> [!NOTE]
+> Para Atlas Vector Search (ambiente de produção), será necessário criar um **Atlas Search Index** do tipo `vectorSearch` para cada coleção via Atlas UI ou API. O nome desse índice deve bater com `search_index_name` configurado no `MongoVectorDb`.
+
+---
+
+## 8. Ordem de Execução da Refatoração
+
+```
+Fase 1 – Dependências (requirements.txt)          → Baixo risco
+Fase 2 – knowledge.py (novas knowledge bases)      → Independente
+Fase 3 – session_store.py                          → Independente
+Fase 4 – agent.py                                  → Depende de 2 e 3
+Fase 5 – routes.py + models.py                     → Depende de 4
+Fase 6 – main.py simplificado                      → Depende de 5
+Fase 7 – Remover arquivos legados                  → Depende de 6 + testes
+```
+
+Cada fase pode ser feita em um branch separado e testada via `/api/health` + `/api/chat` antes de avançar.
+
+---
+
+## 9. Checklist de Validação Pós-Refatoração
+
+- [ ] `GET /api/health` retorna `{ status: "ok", version: "2.0.0" }`
+- [ ] `POST /api/chat` com pergunta simples retorna resposta coerente com o L.E.
+- [ ] `POST /api/chat` com o mesmo `session_id` mantém contexto da conversa anterior
+- [ ] `POST /api/chat/stream` retorna tokens SSE progressivamente
+- [ ] Citações no response contêm livro e referência
+- [ ] Logs do Agno mostram `search_knowledge_base` sendo chamado pelo agente
+- [ ] Coleção `agno_sessions` foi criada no MongoDB com as sessões armazenadas
+- [ ] Sem chamadas manuais a `numpy`, `rank-bm25`, `motor` em código de aplicação

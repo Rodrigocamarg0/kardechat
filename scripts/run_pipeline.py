@@ -3,8 +3,8 @@
 Pipeline completo de ingestão – executa uma vez.
 
 1. Baixa os PDFs
-2. Faz parsing do Livro dos Espíritos (Q/A)
-3. Faz parsing dos demais livros (chunks)
+2. Faz parsing dos livros em chunks
+3. Valida a qualidade dos chunks
 4. Gera embeddings e armazena no MongoDB
 """
 
@@ -36,8 +36,8 @@ def main() -> None:
     print("╚══════════════════════════════════════════════╝")
 
     run_step("Passo 1/4: Baixando PDFs", "download_books.py")
-    run_step("Passo 2/4: Parsing do Livro dos Espíritos (Q&A)", "parse_le.py")
-    run_step("Passo 3/4: Parsing dos demais livros (chunks)", "parse_books.py")
+    run_step("Passo 2/4: Parsing dos livros (chunks)", "parse_books.py")
+    run_step("Passo 3/4: Validando qualidade dos chunks", "validate_chunks.py")
     run_step("Passo 4/4: Gerando embeddings e armazenando no MongoDB", "embed_and_store.py")
 
     print("\n╔══════════════════════════════════════════════╗")

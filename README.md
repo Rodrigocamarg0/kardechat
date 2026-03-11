@@ -1,6 +1,6 @@
 # Kardechat
 
-Chatbot espírita baseado nos 5 livros do Pentateuco Espírita de Allan Kardec. Utiliza **Q-to-Q semantic matching** no Livro dos Espíritos e **RAG tradicional** nos demais livros, com roteamento baseado em confiança.
+Chatbot espírita baseado nas obras de Allan Kardec. Utiliza **RAG** com embeddings e **busca vetorial nativa do MongoDB** sobre os chunks indexados das obras.
 
 ## Arquitetura
 
@@ -11,32 +11,18 @@ Chatbot espírita baseado nos 5 livros do Pentateuco Espírita de Allan Kardec. 
 └─────────────────┘     └──────────────────┘     └───────────┘
 ```
 
-### Sistema Multi-Camada (Confidence-Based Routing)
+### Recuperação
 
-| Similaridade | Confiança | Ação |
-|---|---|---|
-| > 0.88 | Alta | Resposta direta do Livro dos Espíritos |
-| 0.75 – 0.88 | Média | LLM reformula com base nas perguntas encontradas |
-| < 0.75 | Baixa | RAG completo nos 5 livros do Pentateuco |
-
-### Q-to-Q Matching (Livro dos Espíritos)
-
-O Livro dos Espíritos é uma obra de perguntas e respostas. Em vez de RAG tradicional:
-
-- **Indexamos apenas as perguntas** (não as respostas)
-- Quando o usuário pergunta algo, buscamos a **pergunta mais semelhante**
-- Se a similaridade for alta, retornamos a **resposta original** diretamente
-- Isso elimina alucinações e reduz custo/latência
-
-### Busca Híbrida
-
-Combina **busca vetorial** (embeddings + similaridade cosseno) com **busca por palavras-chave** (BM25 via MongoDB text index) para maior precisão.
+- Os livros são quebrados em chunks semânticos
+- Cada chunk recebe embedding
+- O backend consulta o MongoDB com aggregation usando **`$vectorSearch`**
+- O score de similaridade é calculado pela engine do MongoDB, não em Python
 
 ## Stack
 
 - **Frontend:** Next.js 14, Tailwind CSS, TypeScript
 - **Backend:** FastAPI, Motor (async MongoDB)
-- **Banco:** MongoDB (embeddings + text index)
+- **Banco:** MongoDB local com Vector Search
 - **Auth:** Supabase (magic link + OAuth)
 - **Embeddings:** OpenAI `text-embedding-3-large`
 - **LLM:** OpenAI `gpt-4o-mini`
@@ -53,8 +39,8 @@ kardechat/
 ├── backend/           # FastAPI app
 │   └── app/
 │       ├── main.py    # App entrypoint
-│       ├── chat.py    # Chat service + prompts
-│       ├── search.py  # Hybrid search engine
+│       ├── agent.py   # Agente + tool de RAG
+│       ├── knowledge.py # Busca vetorial via aggregation
 │       ├── auth.py    # Supabase JWT auth
 │       └── ...
 ├── scripts/           # Pipeline de ingestão (run once)
@@ -84,9 +70,8 @@ git clone https://github.com/seu-usuario/kardechat.git
 cd kardechat
 
 # Configure as variáveis de ambiente
-cp backend/.env.example backend/.env
-cp frontend/.env.example frontend/.env.local
-# Edite os arquivos com suas chaves
+cp .env.example .env
+# Edite o .env raiz com suas chaves
 ```
 
 ### 3. MongoDB
@@ -105,9 +90,9 @@ python run_pipeline.py
 
 Esse comando:
 1. Baixa os 5 PDFs (domínio público, FEB)
-2. Extrai pares Q/A do Livro dos Espíritos
-3. Divide os demais livros em chunks
-4. Gera embeddings e armazena no MongoDB
+2. Divide as obras indexadas em chunks
+3. Valida a qualidade dos chunks
+4. Gera embeddings e cria o índice vetorial no MongoDB
 
 ### 5. Backend
 
@@ -141,7 +126,7 @@ docker-compose up -d
 2. Em **Authentication > Providers**, habilite:
    - Email (magic link)
    - Google (opcional)
-3. Copie a **URL** e **anon key** para os `.env`
+3. Copie a **URL** e **anon key** para o `.env` raiz
 
 ## API
 

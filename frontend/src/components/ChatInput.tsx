@@ -15,7 +15,7 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height =
-        Math.min(textareaRef.current.scrollHeight, 150) + "px";
+        Math.min(textareaRef.current.scrollHeight, 160) + "px";
     }
   }, [message]);
 
@@ -24,6 +24,7 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (!trimmed || disabled) return;
     onSend(trimmed);
     setMessage("");
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -34,29 +35,36 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
   };
 
   return (
-    <div className="border-t border-spirit-200 bg-white/80 backdrop-blur px-4 py-3">
-      <div className="max-w-3xl mx-auto flex gap-3 items-end">
+    <div className="chat-input-bar">
+      <div
+        style={{
+          maxWidth: "720px",
+          margin: "0 auto",
+          display: "flex",
+          gap: "0.75rem",
+          alignItems: "flex-end",
+        }}
+      >
         <textarea
           ref={textareaRef}
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Faça sua pergunta sobre a Doutrina Espírita..."
+          placeholder="Faça sua pergunta sobre a Doutrina Espírita…"
           disabled={disabled}
           rows={1}
-          className="flex-1 resize-none rounded-xl border border-spirit-300 px-4 py-3 text-spirit-800 placeholder-spirit-400 focus:outline-none focus:ring-2 focus:ring-primary-400 focus:border-transparent disabled:opacity-50 bg-white"
+          className="chat-textarea"
         />
         <button
           onClick={handleSubmit}
           disabled={disabled || !message.trim()}
-          className="bg-primary-700 hover:bg-primary-800 disabled:bg-spirit-300 text-white rounded-xl px-5 py-3 transition-colors font-medium"
+          className="send-btn"
         >
           Enviar
         </button>
       </div>
-      <p className="text-center text-xs text-spirit-400 mt-2 max-w-3xl mx-auto">
-        Respostas baseadas nos livros de Allan Kardec. Para respostas mais
-        detalhadas, peça &ldquo;explique com mais detalhes&rdquo;.
+      <p className="input-hint">
+        Respostas fundamentadas nas obras de Allan Kardec &middot; Shift+Enter para nova linha
       </p>
     </div>
   );

@@ -1,12 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import type { Session } from "@supabase/supabase-js";
 import AuthGuard from "@/components/AuthGuard";
 import ChatMessage from "@/components/ChatMessage";
 import ChatInput from "@/components/ChatInput";
+import ThinkingIndicator from "@/components/ThinkingIndicator";
 import { sendMessage, type Citation } from "@/lib/api";
-import { supabase } from "@/lib/supabase";
 
 interface Message {
   id: string;
@@ -14,22 +13,24 @@ interface Message {
   content: string;
   citations?: Citation[];
   confidence?: string;
+  strategy?: string;
 }
 
-function ChatContent({ session }: { session: Session }) {
+function ChatContent() {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "welcome",
       role: "assistant",
       content:
-        "Olá! Sou o **Kardechat**, seu guia pela Doutrina Espírita. " +
-        "Faça qualquer pergunta sobre os ensinamentos de Allan Kardec e " +
-        "buscarei a resposta nos livros do Pentateuco Espírita.\n\n" +
-        "Você pode pedir respostas mais detalhadas a qualquer momento.",
+        "Olá. Sou o **Kardechat**, seu guia pela Doutrina Espírita.\n\n" +
+        "Faça qualquer pergunta sobre os ensinamentos de Allan Kardec — " +
+        "buscarei a resposta diretamente nas obras indexadas do autor.\n\n" +
+        "Para respostas mais extensas, peça *\"explique com mais detalhes\"*.",
       confidence: "high",
     },
   ]);
   const [isLoading, setIsLoading] = useState(false);
+  const [currentQuestion, setCurrentQuestion] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -43,33 +44,24 @@ function ChatContent({ session }: { session: Session }) {
       content: question,
     };
     setMessages((prev) => [...prev, userMsg]);
+    setCurrentQuestion(question);
     setIsLoading(true);
 
     try {
-      const token = session.access_token;
-
-      // Detecta se o usuário quer resposta extensiva
       const extensivePatterns = [
-        "mais detalhes",
-        "mais detalhe",
-        "explique melhor",
-        "aprofunde",
-        "mais extenso",
-        "mais completo",
-        "detalhe mais",
-        "elabore mais",
-        "cite as fontes",
+        "mais detalhes", "mais detalhe", "explique melhor",
+        "aprofunde", "mais extenso", "mais completo",
+        "detalhe mais", "elabore mais", "cite as fontes",
       ];
       const isExtensive = extensivePatterns.some((p) =>
         question.toLowerCase().includes(p)
       );
 
-      // Pega última resposta do assistente para contexto extensivo
       const lastAssistant = [...messages]
         .reverse()
         .find((m) => m.role === "assistant");
 
-      const response = await sendMessage(question, token, {
+      const response = await sendMessage(question, {
         extensive: isExtensive,
         previous_answer: isExtensive ? lastAssistant?.content : undefined,
       });
@@ -80,6 +72,7 @@ function ChatContent({ session }: { session: Session }) {
         content: response.answer,
         citations: response.citations,
         confidence: response.confidence,
+        strategy: response.strategy,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
@@ -94,39 +87,49 @@ function ChatContent({ session }: { session: Session }) {
       console.error(err);
     } finally {
       setIsLoading(false);
+      setCurrentQuestion("");
     }
   };
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-  };
-
   return (
-    <div className="flex flex-col h-screen bg-spirit-50">
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100dvh",
+        background: "var(--bg-primary)",
+        position: "relative",
+        zIndex: 1,
+      }}
+    >
       {/* Header */}
-      <header className="bg-white/80 backdrop-blur border-b border-spirit-200 px-4 py-3">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="text-2xl">&#9770;</span>
-            <h1 className="text-xl font-bold text-spirit-900">Kardechat</h1>
-          </div>
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-spirit-500 hidden sm:inline">
-              {session.user.email}
-            </span>
-            <button
-              onClick={handleLogout}
-              className="text-sm text-spirit-500 hover:text-spirit-700 transition-colors"
-            >
-              Sair
-            </button>
+      <header className="chat-header">
+        <div
+          style={{
+            maxWidth: "720px",
+            margin: "0 auto",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.875rem",
+          }}
+        >
+          <span className="header-star">✦</span>
+          <div>
+            <div className="header-title">Kardechat</div>
+            <div className="header-subtitle">Doutrina Espírita · Allan Kardec</div>
           </div>
         </div>
       </header>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-6">
-        <div className="max-w-3xl mx-auto">
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "2rem 1.5rem",
+        }}
+      >
+        <div style={{ maxWidth: "720px", margin: "0 auto" }}>
           {messages.map((msg) => (
             <ChatMessage
               key={msg.id}
@@ -134,11 +137,14 @@ function ChatContent({ session }: { session: Session }) {
               content={msg.content}
               citations={msg.citations}
               confidence={msg.confidence}
+              strategy={msg.strategy}
             />
           ))}
 
-          {isLoading && (
-            <ChatMessage role="assistant" content="" isLoading />
+          {isLoading && currentQuestion && (
+            <div className="flex justify-start mb-8">
+              <ThinkingIndicator question={currentQuestion} />
+            </div>
           )}
 
           <div ref={messagesEndRef} />
@@ -154,7 +160,7 @@ function ChatContent({ session }: { session: Session }) {
 export default function ChatPage() {
   return (
     <AuthGuard>
-      {(session) => <ChatContent session={session} />}
+      {() => <ChatContent />}
     </AuthGuard>
   );
 }

@@ -5,8 +5,10 @@ from pydantic import BaseModel
 
 class ChatRequest(BaseModel):
     question: str
-    extensive: bool = False
-    previous_answer: str | None = None
+    session_id: str | None = None
+    # 'extensive' e 'previous_answer' foram removidos:
+    # - histórico é mantido automaticamente pelo Agno via session_id
+    # - o usuário pode pedir respostas extensas diretamente na pergunta
 
 
 class Citation(BaseModel):
@@ -15,15 +17,14 @@ class Citation(BaseModel):
     question: str | None = None
     answer: str | None = None
     text: str | None = None
-    score: float
+    score: float = 0.0
 
 
 class ChatResponse(BaseModel):
     answer: str
-    citations: list[Citation]
-    strategy: str
-    confidence: str
-    top_score: float
+    session_id: str
+    citations: list[Citation] = []
+    strategy: str | None = None  # mantido para compatibilidade com o frontend
 
 
 class HealthResponse(BaseModel):

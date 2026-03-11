@@ -19,14 +19,13 @@ export interface ChatResponse {
 
 export async function sendMessage(
   question: string,
-  token: string,
   options?: { extensive?: boolean; previous_answer?: string }
 ): Promise<ChatResponse> {
   const res = await fetch(`${API_URL}/api/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      Authorization: "Bearer dev-token",
     },
     body: JSON.stringify({
       question,

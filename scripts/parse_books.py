@@ -1,36 +1,83 @@
 #!/usr/bin/env python3
 """
-Parser dos demais livros do Pentateuco Espírita – RAG tradicional.
+Parser das obras indexadas de Allan Kardec para RAG.
 
 Extrai texto dos PDFs e divide em chunks para indexação vetorial.
 """
 
 import os
-import re
 import json
 import fitz  # PyMuPDF
 from config import CHUNK_SIZE, CHUNK_OVERLAP
+from ingestion_utils import (
+    blocks_to_chunks,
+    merge_small_adjacent_chunks,
+    page_to_blocks,
+    should_skip_page,
+)
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 BOOKS_TO_PARSE = [
     {
-        "filename": "livro_dos_mediuns.pdf",
+        "filenames": [
+            "WEB-Livro-dos-Espíritos-Guillon-1.pdf",
+            "livro_dos_espiritos.pdf",
+        ],
+        "nome": "O Livro dos Espíritos",
+    },
+    {
+        "filenames": [
+            "WEB-Livro-dos-Mediuns-Guillon-1.pdf",
+            "livro_dos_mediuns.pdf",
+        ],
         "nome": "O Livro dos Médiuns",
     },
     {
-        "filename": "evangelho_segundo_espiritismo.pdf",
+        "filenames": [
+            "WEB-O-Evangelho-segundo-o-Espiritismo-Guillon.pdf",
+            "evangelho_segundo_espiritismo.pdf",
+        ],
         "nome": "O Evangelho Segundo o Espiritismo",
     },
     {
-        "filename": "ceu_e_inferno.pdf",
+        "filenames": [
+            "WEB-O-Ceu-e-o-inferno-Guillon.pdf",
+            "ceu_e_inferno.pdf",
+        ],
         "nome": "O Céu e o Inferno",
     },
     {
-        "filename": "a_genese.pdf",
+        "filenames": [
+            "WEB-A-Genese-Guillon.pdf",
+            "a_genese.pdf",
+        ],
         "nome": "A Gênese",
     },
+    {
+        "filenames": [
+            "WEB-O-que-e-o-Espiritismo-Reformador.pdf",
+            "o_que_e_o_espiritismo.pdf",
+        ],
+        "nome": "O que é o Espiritismo",
+    },
+    {
+        "filenames": [
+            "WEB-Obras-postumas-Guillon.pdf",
+            "obras_postumas.pdf",
+        ],
+        "nome": "Obras Póstumas",
+    },
 ]
+
+
+def resolve_pdf_path(book_info: dict) -> str | None:
+    """Retorna o primeiro nome de arquivo existente para um livro."""
+    for filename in book_info["filenames"]:
+        pdf_path = os.path.join(DATA_DIR, filename)
+        if os.path.exists(pdf_path):
+            return pdf_path
+    return None
 
 
 def extract_pages(pdf_path: str) -> list[dict]:
@@ -45,40 +92,40 @@ def extract_pages(pdf_path: str) -> list[dict]:
     return pages
 
 
-def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    """Divide texto em chunks com overlap."""
-    words = text.split()
-    chunks = []
-    start = 0
-    while start < len(words):
-        end = start + chunk_size
-        chunk = " ".join(words[start:end])
-        chunk = re.sub(r'\s+', ' ', chunk).strip()
-        if len(chunk) > 20:
-            chunks.append(chunk)
-        start += chunk_size - overlap
-    return chunks
-
-
 def process_book(book_info: dict) -> list[dict]:
     """Processa um livro inteiro em chunks."""
-    pdf_path = os.path.join(DATA_DIR, book_info["filename"])
-    if not os.path.exists(pdf_path):
-        print(f"  ✗ PDF não encontrado: {pdf_path}")
+    pdf_path = resolve_pdf_path(book_info)
+    if not pdf_path:
+        accepted = ", ".join(book_info["filenames"])
+        print(f"  ✗ PDF não encontrado para {book_info['nome']}")
+        print(f"    Arquivos aceitos: {accepted}")
         return []
 
+    print(f"    Arquivo: {os.path.basename(pdf_path)}")
     pages = extract_pages(pdf_path)
     all_chunks = []
+    all_blocks = []
 
     for page_data in pages:
-        chunks = chunk_text(page_data["text"], CHUNK_SIZE, CHUNK_OVERLAP)
-        for i, chunk in enumerate(chunks):
-            all_chunks.append({
-                "book": book_info["nome"],
-                "page": page_data["page"],
-                "chunk_index": i,
-                "text": chunk,
-            })
+        if should_skip_page(page_data["text"]):
+            continue
+        all_blocks.extend(page_to_blocks(page_data["text"], page_data["page"]))
+
+    chunks = blocks_to_chunks(
+        all_blocks,
+        chunk_size=CHUNK_SIZE,
+        overlap=CHUNK_OVERLAP,
+    )
+    chunks = merge_small_adjacent_chunks(chunks)
+    for i, chunk in enumerate(chunks):
+        all_chunks.append({
+            "book": book_info["nome"],
+            "page": chunk["page_start"],
+            "page_end": chunk["page_end"],
+            "chunk_index": i,
+            "word_count": chunk["word_count"],
+            "text": chunk["text"],
+        })
 
     return all_chunks
 

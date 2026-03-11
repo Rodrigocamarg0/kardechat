@@ -1,18 +1,19 @@
-version: "3.9"
-
 services:
   mongodb:
-    image: mongo:7
+    image: mongodb/mongodb-atlas-local:8.0
     container_name: kardechat-mongo
+    hostname: kardechat-mongo
     restart: unless-stopped
     ports:
       - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: kardechat
-      MONGO_INITDB_ROOT_PASSWORD: kardechat_secret
-      MONGO_INITDB_DATABASE: kardechat
     volumes:
       - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   backend:
     build:
@@ -23,20 +24,27 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - ./backend/.env
+      - ./.env
+    environment:
+      MONGO_URI: mongodb://mongodb:27017/kardechat?directConnection=true
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
     container_name: kardechat-frontend
     restart: unless-stopped
     ports:
       - "3000:3000"
     env_file:
-      - ./frontend/.env.local
+      - ./.env
     depends_on:
       - backend
 

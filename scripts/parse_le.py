@@ -14,8 +14,20 @@ import fitz  # PyMuPDF
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-PDF_PATH = os.path.join(DATA_DIR, "livro_dos_espiritos.pdf")
 OUTPUT_PATH = os.path.join(DATA_DIR, "le_qa_pairs.json")
+PDF_CANDIDATES = [
+    "WEB-Livro-dos-Espíritos-Guillon-1.pdf",
+    "livro_dos_espiritos.pdf",
+]
+
+
+def resolve_pdf_path() -> str | None:
+    """Retorna o primeiro PDF do Livro dos Espíritos encontrado em data/."""
+    for filename in PDF_CANDIDATES:
+        path = os.path.join(DATA_DIR, filename)
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -137,13 +149,16 @@ def fallback_parse(text: str) -> list[dict]:
 
 
 def main() -> None:
-    if not os.path.exists(PDF_PATH):
-        print(f"✗ PDF não encontrado: {PDF_PATH}")
+    pdf_path = resolve_pdf_path()
+    if not pdf_path:
+        print(f"✗ PDF não encontrado em {DATA_DIR}")
+        print(f"  Arquivos aceitos: {', '.join(PDF_CANDIDATES)}")
         print("  Execute primeiro: python download_books.py")
         return
 
     print("=== Parsing do Livro dos Espíritos ===\n")
-    text = extract_text_from_pdf(PDF_PATH)
+    print(f"  Usando PDF: {os.path.basename(pdf_path)}")
+    text = extract_text_from_pdf(pdf_path)
     print(f"  Texto extraído: {len(text)} caracteres")
 
     # Tenta parser principal
